@@ -1,0 +1,113 @@
+name: Continuous Integration and Delivery
+
+on:
+  push:
+    branches:
+      - shoxrux18
+
+env:
+  REGISTRY: ghcr.io
+  DJANGO_BACKEND_IMAGE: ghcr.io/$(echo $GITHUB_REPOSITORY | tr '[:upper:]' '[:lower:]')/web
+  DJANGO_NGINX_IMAGE: ghcr.io/$(echo $GITHUB_REPOSITORY | tr '[:upper:]' '[:lower:]')/nginx
+
+jobs:
+  build:
+    name: Build the Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Update .env.prod with Latest Tags
+        run: |
+          echo "DEBUG=0" >> .env.prod
+          echo "SECRET_KEY='$(echo "${{ secrets.SECRET_KEY }}" | sed "s/'/'\"'\"'/g")'" >> .env.prod  
+          echo "DJANGO_ALLOWED_HOSTS='${{ secrets.DJANGO_ALLOWED_HOSTS }}'" >> .env.prod
+          echo "SQL_ENGINE=django.db.backends.postgresql" >> .env.prod
+          echo "SQL_DATABASE=instagram-clone-prod" >> .env.prod
+          echo "SQL_USER=shoxrux" >> .env.prod
+          echo "SQL_PASSWORD=shoxrux" >> .env.prod
+          echo "SQL_HOST=db" >> .env.prod
+          echo "SQL_PORT=5432" >> .env.prod
+          echo "DATABASE=postgres" >> .env.prod
+          echo "NAMESPACE=${{ secrets.NAMESPACE }}" >> .env.prod
+          echo "PERSONAL_ACCESS_TOKEN=${{ secrets.PERSONAL_ACCESS_TOKEN }}" >> .env.prod
+
+      - name: Set Image Tags with Git SHA
+        id: set-tags
+        run: |
+          echo "IMAGE_TAG=${{ github.sha }}" >> $GITHUB_ENV
+          echo "DJANGO_BACKEND_IMAGE=${{ env.REGISTRY }}/django-trio/instagram/web${{ env.IMAGE_TAG }}" >> $GITHUB_ENV
+          echo "DJANGO_NGINX_IMAGE=${{ env.REGISTRY }}/django-trio/instagram/nginx${{ env.IMAGE_TAG }}" >> $GITHUB_ENV
+
+      - name: Log in to GitHub Packages
+        env:
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: echo ${PERSONAL_ACCESS_TOKEN} | docker login ${{ env.REGISTRY }} -u ${{ secrets.NAMESPACE }} --password-stdin
+      
+      - name: Pull Images
+        run: |
+          docker pull ${{ env.DJANGO_BACKEND_IMAGE }} || true
+          docker pull ${{ env.DJANGO_NGINX_IMAGE }} || true
+
+
+      - name: Build Images
+        run: |
+          docker compose build
+
+      - name: Push Images
+        run: |
+          docker push ${{ env.DJANGO_BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          docker push ${{ env.DJANGO_NGINX_IMAGE }}:${{ env.IMAGE_TAG }}
+
+  deploy:
+    name: Deploy to AWS EC2
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v3
+
+      - name: Add environment variables to .env.prod
+        run: |
+          echo "DEBUG=0" >> .env.prod
+          echo "SECRET_KEY='$(echo "${{ secrets.SECRET_KEY }}" | sed "s/'/'\"'\"'/g")'" >> .env.prod  
+          echo "DJANGO_ALLOWED_HOSTS='${{ secrets.DJANGO_ALLOWED_HOSTS }}'" >> .env.prod
+          echo "SQL_ENGINE=django.db.backends.postgresql" >> .env.prod
+          echo "SQL_DATABASE=instagram-clone-prod" >> .env.prod
+          echo "SQL_USER=shoxrux" >> .env.prod
+          echo "SQL_PASSWORD=shoxrux" >> .env.prod
+          echo "SQL_HOST=db" >> .env.prod
+          echo "SQL_PORT=5432" >> .env.prod
+          echo "DATABASE=postgres" >> .env.prod
+          echo "DJANGO_BACKEND_IMAGE=${{ env.DJANGO_BACKEND_IMAGE }}" >> .env.prod
+          echo "DJANGO_NGINX_IMAGE=${{ env.DJANGO_NGINX_IMAGE }}" >> .env.prod
+          echo "NAMESPACE=${{ secrets.NAMESPACE }}" >> .env.prod
+          echo "PERSONAL_ACCESS_TOKEN=${{ secrets.PERSONAL_ACCESS_TOKEN }}" >> .env.prod 
+          echo "IMAGE_TAG=${{ github.sha }}" >> .env.prod 
+
+      - name: Add the private SSH key to the ssh-agent 
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+        run: |
+          mkdir -p ~/.ssh
+          ssh-agent -a $SSH_AUTH_SOCK > /dev/null
+          echo "${{ secrets.AWS_SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/id_rsa
+          chmod 700 ~/.ssh/id_rsa
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Build and deploy images on AWS EC2 
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+        run: |
+          scp  -o StrictHostKeyChecking=no -r ./.env.prod ./docker-compose.prod.yml ubuntu@${{ secrets.AWS_HOST }}:/home/ubuntu/instagram/
+          ssh -o StrictHostKeyChecking=no ubuntu@${{ secrets.AWS_HOST }} << 'ENDSSH'
+            cd /home/ubuntu/instagram/
+            source .env.prod
+            docker login ghcr.io -u $NAMESPACE -p $PERSONAL_ACCESS_TOKEN
+            docker pull $DJANGO_BACKEND_IMAGE:$IMAGE_TAG
+            docker pull $DJANGO_NGINX_IMAGE:$IMAGE_TAG
+            docker compose -f docker-compose.prod.yml --env-file .env.prod down
+            docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build --force-recreate
+          ENDSSH

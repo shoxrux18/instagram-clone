@@ -1,6 +1,6 @@
 FROM python:3.12-slim-bullseye
 
-WORKDIR /usr/src/app
+WORKDIR /home/app/web/
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -12,9 +12,9 @@ COPY ./requirements.txt .
 RUN pip install --default-timeout=100 -r requirements.txt
 
 COPY ./entrypoint.sh .
-RUN sed -i 's/\r$//g' /usr/src/app/entrypoint.sh
-RUN chmod +x /usr/src/app/entrypoint.sh
+RUN sed -i 's/\r$//g' /home/app/web/entrypoint.sh
+RUN chmod +x /home/app/web/entrypoint.sh
 
 COPY . .
 
-ENTRYPOINT ["/usr/src/app/entrypoint.sh"]
+ENTRYPOINT ["/home/app/web/entrypoint.sh"]
